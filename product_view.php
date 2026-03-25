@@ -13,6 +13,19 @@ $productsModule = new ProductsModule();
 $productsEnhanced = new ProductsModuleEnhanced();
 $db = getDB();
 
+if (!function_exists('productViewTableExists')) {
+    function productViewTableExists($db, $tableName) {
+        $row = $db->fetchOne(
+            "SELECT COUNT(*) AS cnt
+             FROM INFORMATION_SCHEMA.TABLES
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = ?",
+            [$tableName]
+        );
+        return (int)($row['cnt'] ?? 0) > 0;
+    }
+}
+
 $id = $_GET['id'] ?? null;
 
 if (!$id) {
@@ -59,6 +72,38 @@ if ((int)$product['stock_quantity'] === 0) {
 } elseif ((int)$product['stock_quantity'] <= 10) {
     $stockLevel = 'low';
     $stockClass = 'warning';
+}
+
+$inStockSerials = [];
+if (
+    productViewTableExists($db, 'product_serial_numbers')
+    && tableColumnExists('product_serial_numbers', 'product_id')
+    && tableColumnExists('product_serial_numbers', 'serial_number')
+    && tableColumnExists('product_serial_numbers', 'status')
+) {
+    $inStockSerials = $db->fetchAll(
+        "SELECT serial_number
+         FROM product_serial_numbers
+         WHERE product_id = ?
+           AND serial_number IS NOT NULL
+           AND TRIM(serial_number) <> ''
+           AND (
+                status IS NULL
+                OR status = ''
+                OR status IN ('in_stock', 'returned')
+           )
+         ORDER BY serial_number ASC",
+        [(int)$id]
+    );
+}
+
+if (empty($inStockSerials) && !empty($product['serial_number'])) {
+    $fallbackSerial = trim((string)$product['serial_number']);
+    if ($fallbackSerial !== '') {
+        $inStockSerials = [
+            ['serial_number' => $fallbackSerial]
+        ];
+    }
 }
 
 include 'templates/header.php';
@@ -195,6 +240,26 @@ include 'templates/header.php';
                         </p>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>In-Stock Serial Numbers</span>
+                <span class="badge bg-light text-dark"><?php echo count($inStockSerials); ?> available</span>
+            </div>
+            <div class="card-body">
+                <?php if (!empty($inStockSerials)): ?>
+                    <div class="d-flex flex-wrap gap-2">
+                        <?php foreach ($inStockSerials as $serialRow): ?>
+                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">
+                                <?php echo escape($serialRow['serial_number']); ?>
+                            </span>
+                        <?php endforeach; ?>
+                    </div>
+                <?php else: ?>
+                    <p class="text-muted mb-0">No in-stock serial numbers found for this product.</p>
+                <?php endif; ?>
             </div>
         </div>
         

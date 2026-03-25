@@ -181,6 +181,8 @@ if ($params['q']) {
 if ($params['status']) {
     $where[] = "po.status = ?";
     $sql_params[] = $params['status'];
+} else {
+    $where[] = "po.status <> 'completed'";
 }
 if ($params['supplier']) {
     $where[] = "po.supplier_id = ?";
@@ -253,11 +255,16 @@ include 'templates/header.php';
         <div class="d-flex justify-content-between align-items-center">
             <div>
                 <h1 class="page-title mb-1">Purchase Orders</h1>
-                <p class="text-muted mb-0">Manage and track all supplier orders</p>
+                <p class="text-muted mb-0">Manage and track active supplier orders</p>
             </div>
-            <a href="po_form.php" class="btn btn-primary btn-lg">
-                <i class="fas fa-plus-circle"></i> <span class="ml-2">Create PO</span>
-            </a>
+            <div class="d-flex gap-2">
+                <a href="purchase_orders_archive.php" class="btn btn-outline-secondary btn-lg">
+                    <i class="fas fa-archive"></i> <span class="ml-2">Archive</span>
+                </a>
+                <a href="po_form.php" class="btn btn-primary btn-lg">
+                    <i class="fas fa-plus-circle"></i> <span class="ml-2">Create PO</span>
+                </a>
+            </div>
         </div>
     </div>
 
@@ -294,7 +301,6 @@ include 'templates/header.php';
                                 <option value="partially_received" <?= $params['status'] === 'partially_received' ? 'selected' : '' ?>>Partially Received</option>
                                 <option value="approved" <?= $params['status'] === 'approved' ? 'selected' : '' ?>>Approved</option>
                                 <option value="rejected" <?= $params['status'] === 'rejected' ? 'selected' : '' ?>>Rejected</option>
-                                <option value="completed" <?= $params['status'] === 'completed' ? 'selected' : '' ?>>Completed</option>
                                 <option value="cancelled" <?= $params['status'] === 'cancelled' ? 'selected' : '' ?>>Cancelled</option>
                             </select>
                         </div>

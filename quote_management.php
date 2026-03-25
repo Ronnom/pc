@@ -1272,6 +1272,16 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
+        if (phone && !/^\d{1,11}$/.test(phone)) {
+            alert("Phone number must contain digits only and must not exceed 11 digits.");
+            return;
+        }
+
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            alert("Please enter a complete email address such as name@gmail.com.");
+            return;
+        }
+
         el("addCustomerBtn").disabled = true;
         el("addCustomerBtn").textContent = "Adding...";
 

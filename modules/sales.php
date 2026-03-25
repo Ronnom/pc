@@ -61,6 +61,25 @@ class SalesModule {
         return $this->db->fetchAll($sql, [$productId]);
     }
 
+    private function getAvailableSerialRowsByIds($productId, array $serialIds) {
+        if (!$this->hasSerialTracking()) {
+            return [];
+        }
+        $serialIds = array_values(array_unique(array_filter(array_map('intval', $serialIds))));
+        if (empty($serialIds)) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($serialIds), '?'));
+        $sql = "SELECT id, serial_number" .
+            (tableColumnExists('product_serial_numbers', 'stocked_cost_price') ? ", stocked_cost_price" : "") .
+            " FROM product_serial_numbers
+              WHERE product_id = ?
+                AND id IN ({$placeholders})
+                AND status IN ('in_stock', 'returned')
+              ORDER BY id ASC";
+        return $this->db->fetchAll($sql, array_merge([(int)$productId], $serialIds));
+    }
+
     /**
      * Generate POS invoice number format: INV-YYYYMMDD-XXXXX
      */
@@ -145,10 +164,16 @@ class SalesModule {
                 }
 
                 if ($serialTrackingEnabled) {
-                    $serialRows = $this->getAvailableSerialRows((int)$item['product_id'], (int)$item['quantity']);
+                    $requestedSerialIds = array_values(array_unique(array_filter(array_map('intval', (array)($item['serial_ids'] ?? [])))));
+                    $serialRows = !empty($requestedSerialIds)
+                        ? $this->getAvailableSerialRowsByIds((int)$item['product_id'], $requestedSerialIds)
+                        : $this->getAvailableSerialRows((int)$item['product_id'], (int)$item['quantity']);
                     $hasSerialInventory = !empty($serialRows);
                     if ($hasSerialInventory && count($serialRows) < (int)$item['quantity']) {
                         throw new Exception("Insufficient serial-numbered stock for {$product['name']}");
+                    }
+                    if ($hasSerialInventory && !empty($requestedSerialIds) && count($requestedSerialIds) !== (int)$item['quantity']) {
+                        throw new Exception("Serial scan count mismatch for {$product['name']}");
                     }
                 }
             }
@@ -210,8 +235,17 @@ class SalesModule {
                 
                 $lineProduct = $this->db->fetchOne("SELECT * FROM products WHERE id = ?", [$item['product_id']]);
                 $quantity = max(1, (int)$item['quantity']);
-                $serialRows = $serialTrackingEnabled ? $this->getAvailableSerialRows((int)$item['product_id'], $quantity) : [];
+                $requestedSerialIds = array_values(array_unique(array_filter(array_map('intval', (array)($item['serial_ids'] ?? [])))));
+                $serialRows = $serialTrackingEnabled
+                    ? (!empty($requestedSerialIds)
+                        ? $this->getAvailableSerialRowsByIds((int)$item['product_id'], $requestedSerialIds)
+                        : $this->getAvailableSerialRows((int)$item['product_id'], $quantity))
+                    : [];
                 $useSerialSale = !empty($serialRows);
+
+                if ($useSerialSale && !empty($requestedSerialIds) && count($serialRows) !== $quantity) {
+                    throw new Exception("Unable to reserve the scanned serial numbers for {$lineProduct['name']}");
+                }
 
                 if ($useSerialSale) {
                     $perUnitSubtotal = round(((float)$itemSubtotal) / $quantity, 2);

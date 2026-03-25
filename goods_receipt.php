@@ -275,7 +275,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Process items
             foreach ($receiving_data['items'] as $item_id => $item_data) {
                 $received_quantity = floatval($item_data['received_quantity'] ?? 0);
-                $quality_check = trim($item_data['quality_check'] ?? '');
 
                 if ($received_quantity > 0) {
                     $item = $poItemsById[(string)$item_id] ?? null;
@@ -286,13 +285,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $stmt = $pdo->prepare("
                                 INSERT INTO stock_receiving_items (
                                     receiving_id, product_id, quantity, received_quantity, cost_per_unit,
-                                    total_cost, quality_check
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    total_cost
+                                ) VALUES (?, ?, ?, ?, ?, ?)
                             ");
                             $stmt->execute([
                                 $receiving_id, $item['product_id'], $item['quantity'], $received_quantity,
-                                $item['unit_cost'], $received_quantity * $item['unit_cost'],
-                                $quality_check
+                                $item['unit_cost'], $received_quantity * $item['unit_cost']
                             ]);
                         }
 
@@ -393,7 +391,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : "Goods received successfully.";
 
             // Redirect after success
-            header("Location: goods_receipt.php?po_id={$po_id}&success=1&message=" . urlencode($message));
+            header("Location: purchase_orders.php?success=1&message=" . urlencode($message));
             exit;
 
         } catch (Exception $e) {
@@ -557,9 +555,7 @@ $receivedByRole = getUserRoleLabel($currentUser) ?? 'Warehouse Staff';
                                     <tr>
                                         <th class="col-gr-product">PRODUCT</th>
                                         <th class="col-gr-ordered text-center">ORDERED</th>
-                                        <th class="col-gr-prev-received text-center">PREVIOUSLY RECEIVED</th>
                                         <th class="col-gr-receiving text-center">RECEIVING QTY</th>
-                                        <th class="col-gr-quality">QUALITY CHECK</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -577,12 +573,7 @@ $receivedByRole = getUserRoleLabel($currentUser) ?? 'Warehouse Staff';
                                         <td class="col-gr-ordered text-center">
                                             <span class="qty-badge"><?= $item['quantity'] ?> <?= htmlspecialchars($item['unit']) ?></span>
                                         </td>
-                                        
-                                        <!-- Previously Received -->
-                                        <td class="col-gr-prev-received text-center">
-                                            <span class="received-qty"><?= $item['received_quantity'] ?> <?= htmlspecialchars($item['unit']) ?></span>
-                                        </td>
-                                        
+
                                         <!-- Receiving Quantity Input -->
                                         <td class="col-gr-receiving">
                                             <input type="number" name="items[<?= $item['id'] ?>][received_quantity]"
@@ -590,18 +581,42 @@ $receivedByRole = getUserRoleLabel($currentUser) ?? 'Warehouse Staff';
                                                     min="0" max="<?= $item['remaining_quantity'] ?>"
                                                    step="0.01" placeholder="0" <?= !$isReceivableStatus ? 'disabled' : '' ?>>
                                         </td>
-                                        
-                                        <!-- Quality Check -->
-                                        <td class="col-gr-quality">
-                                            <input type="text" name="items[<?= $item['id'] ?>][quality_check]"
-                                                   class="form-control-modern gr-quality-input" 
-                                                   placeholder="e.g. Pass/Fail or notes" <?= !$isReceivableStatus ? 'disabled' : '' ?>>
-                                        </td>
                                     </tr>
                                     <?php endforeach; ?>
                                 </tbody>
                             </table>
                         </div>
+
+                        <?php if ($serialTrackingExists): ?>
+                        <div class="card-modern mt-4" id="serial-scan-card">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3">
+                                    <div>
+                                        <h5 class="section-title mb-1">Serial Number Scanning</h5>
+                                        <div class="text-muted small" id="serial-scan-summary">Enter a receiving quantity to start scanning serial numbers.</div>
+                                    </div>
+                                    <span class="badge-modern badge-info" id="serial-scan-progress">0 / 0 scanned</span>
+                                </div>
+
+                                <div id="serial-scan-empty" class="text-muted small">No serial-tracked quantities queued yet.</div>
+
+                                <div id="serial-scan-workspace" style="display:none;">
+                                    <div class="mb-2">
+                                        <div class="fw-600" id="serial-scan-product">Select an item</div>
+                                        <div class="text-muted small" id="serial-scan-step">Serial 1 of 1</div>
+                                    </div>
+                                    <div class="d-flex gap-2 flex-wrap align-items-center mb-2">
+                                        <input type="text" id="serial-scan-input" class="form-control-modern" style="max-width:420px;" placeholder="Scan or enter serial number" autocomplete="off" spellcheck="false" <?= !$isReceivableStatus ? 'disabled' : '' ?>>
+                                        <button type="button" class="btn btn-outline-secondary" id="serial-scan-back" <?= !$isReceivableStatus ? 'disabled' : '' ?>>Back</button>
+                                        <button type="button" class="btn btn-primary" id="serial-scan-next" <?= !$isReceivableStatus ? 'disabled' : '' ?>>Next</button>
+                                    </div>
+                                    <div class="text-muted small mb-3">Press Enter after each scan. Quantities must match the number of captured serials.</div>
+                                    <div id="serial-scan-error" class="alert alert-danger py-2 px-3 mb-3" style="display:none;"></div>
+                                    <div id="serial-scan-list" class="d-grid gap-2"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <?php endif; ?>
 
                         <!-- Action Buttons -->
                         <div class="action-buttons-container mt-5">
@@ -641,8 +656,291 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Form submission confirmation
     const form = document.querySelector('form');
+    const serialTrackingEnabled = <?= $serialTrackingExists ? 'true' : 'false' ?>;
+    const serialPostedState = <?= json_encode($_POST['serials'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const serialItemMeta = <?= json_encode(array_map(static function ($item) {
+        return [
+            'id' => (int)$item['id'],
+            'sku' => (string)$item['sku'],
+            'name' => (string)$item['product_name']
+        ];
+    }, $po_items), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const serialMetaById = {};
+    serialItemMeta.forEach(function(item) {
+        serialMetaById[String(item.id)] = item;
+    });
+
+    let serialRequirements = [];
+    let serialState = {};
+    let activeRequirementIndex = 0;
+    let activeStepIndex = 0;
+
+    function getSerialElements() {
+        return {
+            card: document.getElementById('serial-scan-card'),
+            empty: document.getElementById('serial-scan-empty'),
+            workspace: document.getElementById('serial-scan-workspace'),
+            summary: document.getElementById('serial-scan-summary'),
+            progress: document.getElementById('serial-scan-progress'),
+            product: document.getElementById('serial-scan-product'),
+            step: document.getElementById('serial-scan-step'),
+            input: document.getElementById('serial-scan-input'),
+            back: document.getElementById('serial-scan-back'),
+            next: document.getElementById('serial-scan-next'),
+            error: document.getElementById('serial-scan-error'),
+            list: document.getElementById('serial-scan-list')
+        };
+    }
+
+    function getTotalRequiredSerials() {
+        return serialRequirements.reduce(function(total, item) {
+            return total + item.qty;
+        }, 0);
+    }
+
+    function getCapturedSerialCount() {
+        return serialRequirements.reduce(function(total, item) {
+            const chosen = serialState[String(item.itemId)] || [];
+            return total + chosen.filter(Boolean).length;
+        }, 0);
+    }
+
+    function setSerialError(message) {
+        const { error } = getSerialElements();
+        if (!error) return;
+        error.textContent = message || '';
+        error.style.display = message ? 'block' : 'none';
+    }
+
+    function syncSerialHiddenInputs() {
+        if (!form) return;
+        form.querySelectorAll('input[data-serial-hidden="1"]').forEach(function(input) {
+            input.remove();
+        });
+
+        Object.keys(serialState).forEach(function(itemId) {
+            (serialState[itemId] || []).filter(Boolean).forEach(function(serial) {
+                const hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = `serials[${itemId}][]`;
+                hidden.value = serial;
+                hidden.setAttribute('data-serial-hidden', '1');
+                form.appendChild(hidden);
+            });
+        });
+    }
+
+    function findFirstIncompletePosition() {
+        for (let i = 0; i < serialRequirements.length; i += 1) {
+            const requirement = serialRequirements[i];
+            const chosen = serialState[String(requirement.itemId)] || [];
+            for (let s = 0; s < requirement.qty; s += 1) {
+                if (!chosen[s]) {
+                    return { requirementIndex: i, stepIndex: s };
+                }
+            }
+        }
+        if (!serialRequirements.length) {
+            return { requirementIndex: 0, stepIndex: 0 };
+        }
+        return {
+            requirementIndex: serialRequirements.length - 1,
+            stepIndex: Math.max(0, serialRequirements[serialRequirements.length - 1].qty - 1)
+        };
+    }
+
+    function moveSerialCursor(delta) {
+        let reqIndex = activeRequirementIndex;
+        let stepIndex = activeStepIndex + delta;
+        while (reqIndex >= 0 && reqIndex < serialRequirements.length) {
+            const qty = serialRequirements[reqIndex].qty;
+            if (stepIndex >= 0 && stepIndex < qty) {
+                activeRequirementIndex = reqIndex;
+                activeStepIndex = stepIndex;
+                return true;
+            }
+            if (stepIndex < 0) {
+                reqIndex -= 1;
+                if (reqIndex < 0) break;
+                stepIndex = serialRequirements[reqIndex].qty - 1;
+            } else {
+                reqIndex += 1;
+                stepIndex = 0;
+            }
+        }
+        return false;
+    }
+
+    function buildSerialRequirements() {
+        const nextRequirements = [];
+        qtyInputs.forEach(function(input) {
+            const qty = parseFloat(input.value) || 0;
+            if (qty <= 0) return;
+            if (!Number.isInteger(qty)) return;
+            const row = input.closest('.gr-item-row');
+            const itemId = row ? row.getAttribute('data-item-id') : '';
+            if (!itemId) return;
+            const meta = serialMetaById[String(itemId)] || {};
+            nextRequirements.push({
+                itemId: String(itemId),
+                qty: qty,
+                sku: meta.sku || '',
+                name: meta.name || ''
+            });
+        });
+        serialRequirements = nextRequirements;
+
+        const nextState = {};
+        serialRequirements.forEach(function(requirement) {
+            const existing = Array.isArray(serialState[requirement.itemId]) ? serialState[requirement.itemId] : [];
+            nextState[requirement.itemId] = existing.slice(0, requirement.qty);
+        });
+        serialState = nextState;
+
+        const nextPos = findFirstIncompletePosition();
+        activeRequirementIndex = nextPos.requirementIndex;
+        activeStepIndex = nextPos.stepIndex;
+        syncSerialHiddenInputs();
+        renderSerialScanner();
+    }
+
+    function renderSerialList(requirement) {
+        const { list } = getSerialElements();
+        if (!list || !requirement) return;
+        const chosen = serialState[String(requirement.itemId)] || [];
+        if (!chosen.filter(Boolean).length) {
+            list.innerHTML = '<div class="text-muted small">No serial numbers captured for this item yet.</div>';
+            return;
+        }
+        list.innerHTML = chosen
+            .filter(Boolean)
+            .map(function(serial, index) {
+                return `<div class="d-flex align-items-center justify-content-between border rounded px-3 py-2 bg-white">
+                    <span class="text-muted small">Serial ${index + 1}</span>
+                    <span class="fw-600">${serial}</span>
+                </div>`;
+            })
+            .join('');
+    }
+
+    function renderSerialScanner() {
+        const elements = getSerialElements();
+        if (!serialTrackingEnabled || !elements.card) return;
+
+        const totalRequired = getTotalRequiredSerials();
+        const captured = getCapturedSerialCount();
+        elements.progress.textContent = `${captured} / ${totalRequired} scanned`;
+
+        if (!serialRequirements.length) {
+            elements.empty.style.display = '';
+            elements.workspace.style.display = 'none';
+            elements.summary.textContent = 'Enter a receiving quantity to start scanning serial numbers.';
+            setSerialError('');
+            return;
+        }
+
+        elements.empty.style.display = 'none';
+        elements.workspace.style.display = '';
+
+        const requirement = serialRequirements[activeRequirementIndex];
+        const chosen = serialState[String(requirement.itemId)] || [];
+        const currentValue = chosen[activeStepIndex] || '';
+        elements.summary.textContent = captured === totalRequired
+            ? 'All required serial numbers are captured.'
+            : 'Scan serial numbers one by one based on the receiving quantities.';
+        elements.product.textContent = [requirement.sku, requirement.name].filter(Boolean).join(' • ');
+        elements.step.textContent = `Serial ${activeStepIndex + 1} of ${requirement.qty}`;
+        elements.input.value = currentValue;
+        elements.back.disabled = activeRequirementIndex === 0 && activeStepIndex === 0;
+        elements.next.textContent = (activeRequirementIndex === serialRequirements.length - 1 && activeStepIndex === requirement.qty - 1)
+            ? 'Finish'
+            : 'Next';
+        renderSerialList(requirement);
+
+        if (!elements.input.disabled) {
+            window.setTimeout(function() {
+                elements.input.focus();
+                elements.input.select();
+            }, 0);
+        }
+    }
+
+    function isDuplicateSerial(itemId, value) {
+        const normalized = value.trim().toLowerCase();
+        return (serialState[String(itemId)] || []).some(function(serial, index) {
+            return index !== activeStepIndex && serial && serial.trim().toLowerCase() === normalized;
+        });
+    }
+
+    function handleSerialNext() {
+        const elements = getSerialElements();
+        const requirement = serialRequirements[activeRequirementIndex];
+        if (!elements.input || !requirement) return;
+
+        const value = elements.input.value.trim();
+        if (!value) {
+            setSerialError('Scan or enter a serial number first.');
+            return;
+        }
+        if (isDuplicateSerial(requirement.itemId, value)) {
+            setSerialError('Duplicate serial number detected for this item.');
+            return;
+        }
+
+        const chosen = serialState[String(requirement.itemId)] || [];
+        chosen[activeStepIndex] = value;
+        serialState[String(requirement.itemId)] = chosen;
+        syncSerialHiddenInputs();
+        setSerialError('');
+
+        if (moveSerialCursor(1)) {
+            renderSerialScanner();
+            return;
+        }
+
+        renderSerialScanner();
+    }
+
+    function initializeSerialStateFromPost() {
+        Object.keys(serialPostedState || {}).forEach(function(itemId) {
+            const postedSerials = Array.isArray(serialPostedState[itemId]) ? serialPostedState[itemId] : [];
+            serialState[String(itemId)] = postedSerials
+                .map(function(value) { return String(value || '').trim(); })
+                .filter(function(value) { return value !== ''; });
+        });
+        syncSerialHiddenInputs();
+    }
+
+    initializeSerialStateFromPost();
+    buildSerialRequirements();
+
+    qtyInputs.forEach(function(input) {
+        input.addEventListener('input', buildSerialRequirements);
+    });
+
+    const serialElements = getSerialElements();
+    if (serialElements.input) {
+        serialElements.input.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                handleSerialNext();
+            }
+        });
+    }
+    if (serialElements.back) {
+        serialElements.back.addEventListener('click', function() {
+            if (moveSerialCursor(-1)) {
+                setSerialError('');
+                renderSerialScanner();
+            }
+        });
+    }
+    if (serialElements.next) {
+        serialElements.next.addEventListener('click', handleSerialNext);
+    }
+
+    // Form submission confirmation
     if (form) {
         form.addEventListener('submit', function(e) {
             let hasValues = false;
@@ -658,59 +956,32 @@ document.addEventListener('DOMContentLoaded', function() {
                 return false;
             }
 
-            const serialTrackingEnabled = <?= $serialTrackingExists ? 'true' : 'false' ?>;
             if (serialTrackingEnabled) {
-                // Remove previously generated serial inputs before rebuilding.
-                form.querySelectorAll('input[name^="serials["]').forEach(function(input) {
-                    input.remove();
-                });
+                buildSerialRequirements();
+                syncSerialHiddenInputs();
 
-                for (const input of qtyInputs) {
-                    const qty = parseFloat(input.value) || 0;
-                    if (qty <= 0) continue;
-                    if (!Number.isInteger(qty)) {
+                for (const requirement of serialRequirements) {
+                    if (!Number.isInteger(requirement.qty)) {
                         e.preventDefault();
                         alert('Serial tracking requires whole-number quantities.');
                         return false;
                     }
-                    const row = input.closest('.gr-item-row');
-                    const itemId = row ? row.getAttribute('data-item-id') : null;
-                    const sku = row ? (row.querySelector('.product-sku')?.textContent || '') : '';
-                    const name = row ? (row.querySelector('.product-name')?.textContent || '') : '';
-                    const label = [sku, name].filter(Boolean).join(' • ') || 'product';
-                    if (!itemId) continue;
-                    const serialPrompt = `Scan/input ${qty} serial number(s) for ${label}.\nUse comma, space, or new line separators.`;
-                    const raw = window.prompt(serialPrompt, '');
-                    if (raw === null) {
+                    const chosen = serialState[String(requirement.itemId)] || [];
+                    if (chosen.filter(Boolean).length !== requirement.qty) {
+                        const nextPos = findFirstIncompletePosition();
+                        activeRequirementIndex = nextPos.requirementIndex;
+                        activeStepIndex = nextPos.stepIndex;
+                        renderSerialScanner();
                         e.preventDefault();
+                        alert(`Please scan exactly ${requirement.qty} serial number(s) for ${[requirement.sku, requirement.name].filter(Boolean).join(' • ')}.`);
                         return false;
                     }
-                    const serials = raw
-                        .split(/[\n,\s]+/)
-                        .map(function(v) { return v.trim(); })
-                        .filter(function(v) { return v.length > 0; });
-
-                    if (serials.length !== qty) {
+                    const normalized = chosen.map(function(v) { return v.toLowerCase(); });
+                    if (new Set(normalized).size !== chosen.length) {
                         e.preventDefault();
-                        alert(`You must provide exactly ${qty} serial number(s) for ${label}.`);
+                        alert(`Duplicate serial numbers detected for ${[requirement.sku, requirement.name].filter(Boolean).join(' • ')}.`);
                         return false;
                     }
-
-                    const normalized = serials.map(function(v) { return v.toLowerCase(); });
-                    const uniqueCount = new Set(normalized).size;
-                    if (uniqueCount !== serials.length) {
-                        e.preventDefault();
-                        alert(`Duplicate serial numbers detected for ${label}.`);
-                        return false;
-                    }
-
-                    serials.forEach(function(serial) {
-                        const hidden = document.createElement('input');
-                        hidden.type = 'hidden';
-                        hidden.name = `serials[${itemId}][]`;
-                        hidden.value = serial;
-                        form.appendChild(hidden);
-                    });
                 }
             }
         });

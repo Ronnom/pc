@@ -181,16 +181,19 @@ document.addEventListener("DOMContentLoaded", () => {
             list.innerHTML = '<div class="text-muted small">Cart is empty.</div>';
         } else {
             items.forEach((item) => {
+                const serials = Array.isArray(item.scanned_serials) ? item.scanned_serials : [];
+                const serialized = !!item.has_serial_tracking;
                 const row = document.createElement("div");
                 row.className = "d-flex align-items-center justify-content-between p-2 mb-2 pos-cart-item";
                 row.innerHTML = `
                     <div class="flex-grow-1 pe-2">
                         <div class="small fw-semibold">${item.name}</div>
+                        ${serialized ? `<div class="small text-muted mt-1">Scanned serials: ${serials.length ? serials.join(", ") : "None yet"}</div>` : ""}
                     </div>
                     <div class="d-flex align-items-center gap-2">
-                        <button type="button" class="btn btn-outline-secondary btn-sm qty-minus">-</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm qty-minus" ${serialized ? "disabled" : ""}>-</button>
                         <div class="small fw-semibold text-end">Qty: ${item.quantity}</div>
-                        <button type="button" class="btn btn-outline-secondary btn-sm qty-plus">+</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm qty-plus" ${serialized ? "disabled" : ""}>+</button>
                     </div>
                 `;
                 row.querySelector(".qty-minus")?.addEventListener("click", async (ev) => {
@@ -208,6 +211,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 row.querySelector(".qty-plus")?.addEventListener("click", async (ev) => {
                     ev.stopPropagation();
                     try {
+                        if (serialized) {
+                            toast("Scan another serial number for this product to add one more unit.");
+                            return;
+                        }
                         await api("update_cart", "POST", { product_id: item.product_id, quantity: Number(item.quantity || 0) + 1 });
                         await refreshCart();
                     } catch (e) { toast(e.message); }
@@ -242,6 +249,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const col = document.createElement("div");
             col.className = "col-md-4";
             const out = Number(p.stock_quantity || 0) <= 0;
+            const requiresSerial = !!p.requires_serial_scan;
             col.innerHTML = `
                 <div class="card h-100">
                     <div class="card-img-wrap"><img src="${p.image || ""}" class="card-img-top" style="height:100%;object-fit:cover" onerror="this.style.display='none'"></div>
@@ -252,17 +260,23 @@ document.addEventListener("DOMContentLoaded", () => {
                         </div>
                         <div class="small text-muted">${p.sku || ""}</div>
                         <div class="small fw-semibold mt-1">${fmt(p.selling_price)}</div>
+                        ${requiresSerial ? `<div class="small text-primary mt-2">Serialized item. Scan the unit serial number in the search box to add it.</div>` : ""}
                     </div>
                     <div class="card-footer">
                         <div class="input-group input-group-sm">
-                            <input type="number" min="1" value="1" class="form-control qty">
-                            <button class="btn btn-primary add" ${out ? "disabled" : ""}>Add</button>
+                            <input type="number" min="1" value="1" class="form-control qty" ${requiresSerial ? "disabled" : ""}>
+                            <button class="btn btn-primary add" ${out ? "disabled" : ""}>${requiresSerial ? "Scan Serial" : "Add"}</button>
                         </div>
                     </div>
                 </div>
                 `;
             col.querySelector(".add").addEventListener("click", async () => {
                 try {
+                    if (requiresSerial) {
+                        el("product-search")?.focus();
+                        toast("Scan the product serial number in the search box to add this exact unit.");
+                        return;
+                    }
                     const qty = col.querySelector(".qty").value || "1";
                     await api("add_to_cart", "POST", { product_id: p.id, quantity: qty });
                     await refreshCart();

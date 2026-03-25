@@ -85,13 +85,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if (empty($data['phone'])) {
         $errors[] = 'Phone number is required';
-    } elseif (!preg_match('/^[\d\-\+\s\(\)]+$/', $data['phone']) || strlen(preg_replace('/[^\d]/', '', $data['phone'])) < 10) {
-        $errors[] = 'Invalid phone number format (minimum 10 digits)';
+    } else {
+        $normalizedPhone = preg_replace('/\D+/', '', $data['phone']);
+        if ($normalizedPhone === '' || strlen($normalizedPhone) > 11) {
+            $errors[] = 'Phone number must contain digits only and must not exceed 11 digits.';
+        } else {
+            $data['phone'] = $normalizedPhone;
+        }
     }
     if (empty($data['email'])) {
         $errors[] = 'Email is required';
     } elseif (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
-        $errors[] = 'Invalid email format';
+        $errors[] = 'Please enter a complete email address such as name@gmail.com.';
     }
     if ($data['customer_type'] === 'business' && empty($data['tax_id'])) {
         $errors[] = 'Tax ID is required for business customers';
@@ -100,7 +105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Duplicate check (email and phone)
     if (empty($errors)) {
         $dup_query = "SELECT id FROM customers WHERE (email = ? OR phone = ?)";
-        $dup_params = [$data['email'], preg_replace('/[^\d]/', '', $data['phone'])];
+        $dup_params = [$data['email'], $data['phone']];
         
         if ($editing) {
             $dup_query .= " AND id != ?";
@@ -123,7 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $data['middle_name'],
                     $data['last_name'],
                     $data['email'],
-                    preg_replace('/[^\d]/', '', $data['phone']),
+                    $data['phone'],
                     $data['address'],
                     $data['city']
                 ];
@@ -171,7 +176,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'middle_name' => $data['middle_name'],
                     'last_name' => $data['last_name'],
                     'email' => $data['email'],
-                    'phone' => preg_replace('/[^\d]/', '', $data['phone']),
+                    'phone' => $data['phone'],
                     'address' => $data['address'],
                     'city' => $data['city'],
                     'country' => $data['country'],
@@ -273,7 +278,7 @@ include 'templates/header.php';
             
             <div class="col-md-6">
                 <label class="form-label">Phone Number <span class="text-danger">*</span></label>
-                <input type="tel" class="form-control" name="phone" placeholder="+1 (555) 123-4567" value="<?php echo escape($customer['phone'] ?? ''); ?>" required>
+                <input type="tel" class="form-control" name="phone" maxlength="11" inputmode="numeric" pattern="\d{1,11}" placeholder="09171234567" value="<?php echo escape($customer['phone'] ?? ''); ?>" required>
             </div>
             
             <!-- Address Section -->

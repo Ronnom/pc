@@ -158,6 +158,48 @@ function posPromo($code, $base) {
     return $defs[$code]['type'] === 'percent' ? $base * ($defs[$code]['value'] / 100) : $defs[$code]['value'];
 }
 
+function posHasSerialTracking($db) {
+    return posTableExists($db, 'product_serial_numbers')
+        && tableColumnExists('product_serial_numbers', 'product_id')
+        && tableColumnExists('product_serial_numbers', 'serial_number')
+        && tableColumnExists('product_serial_numbers', 'status');
+}
+
+function posFindAvailableSerialRow($db, $code) {
+    if (!posHasSerialTracking($db)) {
+        return null;
+    }
+    $code = trim((string)$code);
+    if ($code === '') {
+        return null;
+    }
+    return $db->fetchOne(
+        "SELECT psn.id, psn.product_id, psn.serial_number, " .
+        (tableColumnExists('product_serial_numbers', 'stocked_cost_price') ? "psn.stocked_cost_price, " : "") .
+        "p.name, p.sku, p.stock_quantity, p.is_active
+         FROM product_serial_numbers psn
+         INNER JOIN products p ON p.id = psn.product_id
+         WHERE psn.serial_number = ?
+           AND psn.status IN ('in_stock', 'returned')
+         LIMIT 1",
+        [$code]
+    );
+}
+
+function posGetAvailableSerialCount($db, $productId) {
+    if (!posHasSerialTracking($db)) {
+        return 0;
+    }
+    $row = $db->fetchOne(
+        "SELECT COUNT(*) AS cnt
+         FROM product_serial_numbers
+         WHERE product_id = ?
+           AND status IN ('in_stock', 'returned')",
+        [(int)$productId]
+    );
+    return (int)($row['cnt'] ?? 0);
+}
+
 function posTotals($cart, $settings) {
     $taxRate = max(0, (float)$settings['tax_rate']);
     $inclusive = !empty($settings['tax_inclusive']);
@@ -185,6 +227,9 @@ function posTotals($cart, $settings) {
             'quantity' => $qty,
             'unit_price' => round($price, 2),
             'stock_quantity' => (int)$line['stock_quantity'],
+            'has_serial_tracking' => !empty($line['has_serial_tracking']),
+            'scanned_serials' => array_values(array_filter(array_map('strval', $line['scanned_serials'] ?? []))),
+            'scanned_serial_ids' => array_values(array_map('intval', $line['scanned_serial_ids'] ?? [])),
             'line_discount' => round($disc, 2),
             'tax_amount' => round($tax, 2),
             'subtotal' => round($subtotal, 2),
@@ -380,35 +425,81 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
             foreach ($products as &$p) {
                 $img = $db->fetchOne("SELECT image_path FROM product_images WHERE product_id = ? ORDER BY is_primary DESC,id ASC LIMIT 1", [$p['id']]);
                 $p['image'] = $img['image_path'] ?? null;
+                $p['available_serial_count'] = posGetAvailableSerialCount($db, (int)$p['id']);
+                $p['requires_serial_scan'] = $p['available_serial_count'] > 0;
             }
             posJson(['success' => true, 'products' => $products, 'page' => $page, 'total_pages' => (int)ceil(((int)$count) / $per)]);
         }
         if ($action === 'scan_code') {
             $code = trim((string)($_GET['code'] ?? ''));
+            $serialRow = posFindAvailableSerialRow($db, $code);
+            if ($serialRow && (int)($serialRow['is_active'] ?? 0) === 1) {
+                $_POST['product_id'] = (int)$serialRow['product_id'];
+                $_POST['quantity'] = 1;
+                $_POST['product_serial_number_id'] = (int)$serialRow['id'];
+                $_POST['serial_number'] = (string)$serialRow['serial_number'];
+                $action = 'add_to_cart';
+            }
             if ($hasProductBarcode) {
                 $row = $db->fetchOne("SELECT * FROM products WHERE is_active = 1 AND (sku = ? OR barcode = ?) LIMIT 1", [$code, $code]);
             } else {
                 $row = $db->fetchOne("SELECT * FROM products WHERE is_active = 1 AND sku = ? LIMIT 1", [$code]);
             }
-            if (!$row) posJson(['success' => false, 'message' => 'No product matched scan code.'], 404);
-            $_POST['product_id'] = $row['id']; $_POST['quantity'] = 1; $action = 'add_to_cart';
+            if ($action !== 'add_to_cart') {
+                if (!$row) posJson(['success' => false, 'message' => 'No product or serial matched the scan.'], 404);
+                $_POST['product_id'] = $row['id']; $_POST['quantity'] = 1; $action = 'add_to_cart';
+            }
         }
         if ($action === 'add_to_cart') {
             $pid = (int)($_POST['product_id'] ?? 0); $qty = max(1, (int)($_POST['quantity'] ?? 1));
+            $serialId = (int)($_POST['product_serial_number_id'] ?? 0);
+            $serialNumber = trim((string)($_POST['serial_number'] ?? ''));
             $p = $productsModule->getProduct($pid, true);
             if (!$p || (int)$p['is_active'] !== 1) posJson(['success' => false, 'message' => 'Product unavailable.'], 404);
+            $availableSerialCount = posGetAvailableSerialCount($db, $pid);
+            $requiresSerialScan = $availableSerialCount > 0;
+            if ($requiresSerialScan && $serialId <= 0) {
+                posJson(['success' => false, 'message' => 'This product requires serial scanning. Scan the unit serial number to add it to checkout.'], 422);
+            }
             if (!isset($_SESSION['pos_cart'][$pid])) {
                 $img = $db->fetchOne("SELECT image_path FROM product_images WHERE product_id = ? ORDER BY is_primary DESC,id ASC LIMIT 1", [$pid]);
-                $_SESSION['pos_cart'][$pid] = ['product_id' => $pid, 'name' => $p['name'], 'sku' => $p['sku'], 'image' => $img['image_path'] ?? null, 'unit_price' => getProductPriceValue($p), 'stock_quantity' => (int)$p['stock_quantity'], 'quantity' => 0, 'discount_type' => 'none', 'discount_value' => 0];
+                $_SESSION['pos_cart'][$pid] = ['product_id' => $pid, 'name' => $p['name'], 'sku' => $p['sku'], 'image' => $img['image_path'] ?? null, 'unit_price' => getProductPriceValue($p), 'stock_quantity' => (int)$p['stock_quantity'], 'quantity' => 0, 'discount_type' => 'none', 'discount_value' => 0, 'has_serial_tracking' => $requiresSerialScan, 'scanned_serial_ids' => [], 'scanned_serials' => []];
             }
-            $newQty = $_SESSION['pos_cart'][$pid]['quantity'] + $qty;
-            if ($newQty > (int)$p['stock_quantity']) posJson(['success' => false, 'message' => 'Insufficient stock.'], 422);
-            $_SESSION['pos_cart'][$pid]['quantity'] = $newQty;
+            $_SESSION['pos_cart'][$pid]['has_serial_tracking'] = $requiresSerialScan;
+            if ($requiresSerialScan) {
+                $serialRow = $db->fetchOne(
+                    "SELECT id, product_id, serial_number
+                     FROM product_serial_numbers
+                     WHERE id = ?
+                       AND product_id = ?
+                       AND status IN ('in_stock', 'returned')
+                     LIMIT 1",
+                    [$serialId, $pid]
+                );
+                if (!$serialRow) {
+                    posJson(['success' => false, 'message' => 'Serial number is no longer available.'], 422);
+                }
+                foreach ($_SESSION['pos_cart'] as $line) {
+                    if (in_array((int)$serialRow['id'], array_map('intval', $line['scanned_serial_ids'] ?? []), true)) {
+                        posJson(['success' => false, 'message' => 'That serial number is already in the checkout.'], 422);
+                    }
+                }
+                $_SESSION['pos_cart'][$pid]['scanned_serial_ids'][] = (int)$serialRow['id'];
+                $_SESSION['pos_cart'][$pid]['scanned_serials'][] = (string)($serialNumber !== '' ? $serialNumber : $serialRow['serial_number']);
+                $_SESSION['pos_cart'][$pid]['quantity'] = count($_SESSION['pos_cart'][$pid]['scanned_serial_ids']);
+            } else {
+                $newQty = $_SESSION['pos_cart'][$pid]['quantity'] + $qty;
+                if ($newQty > (int)$p['stock_quantity']) posJson(['success' => false, 'message' => 'Insufficient stock.'], 422);
+                $_SESSION['pos_cart'][$pid]['quantity'] = $newQty;
+            }
             posJson(['success' => true, 'cart' => posTotals($_SESSION['pos_cart'], $_SESSION['pos_settings'])]);
         }
         if ($action === 'update_cart') {
             $pid = (int)($_POST['product_id'] ?? 0); $qty = (int)($_POST['quantity'] ?? 1);
             if (!isset($_SESSION['pos_cart'][$pid])) posJson(['success' => false, 'message' => 'Item not found.'], 404);
+            if (!empty($_SESSION['pos_cart'][$pid]['has_serial_tracking'])) {
+                posJson(['success' => false, 'message' => 'Serialized items must be added by scanning each serial number.'], 422);
+            }
             if ($qty <= 0) unset($_SESSION['pos_cart'][$pid]); else {
                 if ($qty > (int)$_SESSION['pos_cart'][$pid]['stock_quantity']) posJson(['success' => false, 'message' => 'Quantity exceeds stock.'], 422);
                 $_SESSION['pos_cart'][$pid]['quantity'] = $qty;
@@ -474,7 +565,21 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === '1') {
             unset($paymentRow);
             $paid = 0; foreach ($payments as $p) $paid += max(0, (float)($p['amount'] ?? 0));
             if ($paid < (float)$computed['totals']['total']) posJson(['success' => false, 'message' => 'Insufficient payment.'], 422);
-            $items = []; foreach ($computed['items'] as $it) $items[] = ['product_id' => $it['product_id'], 'quantity' => $it['quantity'], 'unit_price' => $it['unit_price'], 'discount_amount' => $it['line_discount'], 'tax_amount' => $it['tax_amount'], 'subtotal' => $it['subtotal'], 'total' => $it['total']];
+            $items = [];
+            foreach ($computed['items'] as $it) {
+                $source = $_SESSION['pos_cart'][$it['product_id']] ?? [];
+                $items[] = [
+                    'product_id' => $it['product_id'],
+                    'quantity' => $it['quantity'],
+                    'unit_price' => $it['unit_price'],
+                    'discount_amount' => $it['line_discount'],
+                    'tax_amount' => $it['tax_amount'],
+                    'subtotal' => $it['subtotal'],
+                    'total' => $it['total'],
+                    'serial_ids' => array_values(array_map('intval', $source['scanned_serial_ids'] ?? [])),
+                    'serial_numbers' => array_values(array_filter(array_map('strval', $source['scanned_serials'] ?? [])))
+                ];
+            }
             $txId = $salesModule->createTransaction([
                 'use_precomputed_totals' => true,
                 'transaction_number' => 'INV-' . date('Ymd') . '-' . str_pad((string)(((int)($db->fetchOne("SELECT COUNT(*) as c FROM transactions WHERE DATE(transaction_date)=?", [date('Y-m-d')])['c'] ?? 0)) + 1), 5, '0', STR_PAD_LEFT),
@@ -761,11 +866,12 @@ include 'templates/header.php';
                 <div class="row g-2 align-items-center">
                     <div class="col-md-8">
                         <div class="input-group">
-                            <input id="product-search" class="form-control form-control-lg" placeholder="Search products, SKU, barcode">
+                            <input id="product-search" class="form-control form-control-lg" placeholder="Search products, SKU, barcode, or scan serial number">
                             <button id="scan-barcode" class="btn btn-outline-secondary scan-btn" type="button" title="Scan Barcode">
                                 <i class="bi bi-upc-scan"></i>
                             </button>
                         </div>
+                        <div class="small text-muted mt-1">Serialized products must be added by scanning their exact serial number in the search box.</div>
                     </div>
                     <div class="col-md-3"><select id="category-filter" class="form-select"><option value="">All Categories</option><?php foreach ($categories as $cat): ?><option value="<?php echo (int)$cat['id']; ?>"><?php echo escape($cat['name']); ?></option><?php endforeach; ?></select></div>
                     <div class="col-md-1 d-grid"><button id="refresh-products" class="btn btn-outline-primary"><i class="bi bi-arrow-clockwise"></i></button></div>

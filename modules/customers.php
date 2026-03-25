@@ -38,6 +38,28 @@ class CustomersModule {
         return isset($this->customerColumns[$columnName]);
     }
 
+    private function normalizePhone($phone) {
+        return preg_replace('/\D+/', '', (string)$phone);
+    }
+
+    private function validateCustomerContactData(array &$data) {
+        if (array_key_exists('phone', $data) && $data['phone'] !== null && $data['phone'] !== '') {
+            $normalizedPhone = $this->normalizePhone($data['phone']);
+            if ($normalizedPhone === '' || strlen($normalizedPhone) > 11) {
+                throw new Exception('Phone number must contain digits only and must not exceed 11 digits.');
+            }
+            $data['phone'] = $normalizedPhone;
+        }
+
+        if (array_key_exists('email', $data) && $data['email'] !== null && $data['email'] !== '') {
+            $email = trim((string)$data['email']);
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                throw new Exception('Please enter a complete email address such as name@gmail.com.');
+            }
+            $data['email'] = $email;
+        }
+    }
+
     private function filterCustomerData(array $data) {
         $this->loadCustomerColumns();
         $filtered = [];
@@ -106,6 +128,8 @@ class CustomersModule {
      * Create customer
      */
     public function createCustomer($data) {
+        $this->validateCustomerContactData($data);
+
         // Generate customer code only when schema supports it.
         if ($this->hasCustomerColumn('customer_code') && empty($data['customer_code'])) {
             $data['customer_code'] = 'CUST-' . strtoupper(substr(md5(uniqid()), 0, 8));
@@ -137,6 +161,8 @@ class CustomersModule {
      * Update customer
      */
     public function updateCustomer($id, $data) {
+        $this->validateCustomerContactData($data);
+
         $updateData = $this->filterCustomerData($data);
         if (!empty($updateData)) {
             $this->db->update('customers', $updateData, 'id = ?', [$id]);
