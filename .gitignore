@@ -1,0 +1,43 @@
+# PC POS System - Git Ignore
+
+# Configuration files with sensitive data
+config/config.local.php
+
+# Uploads directory
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+
+# Composer
+vendor/
+composer.lock
+
+# Node modules (if using npm)
+node_modules/
+package-lock.json
+
+# Backup files
+*.bak
+*.backup
+*.sql.gz
+
